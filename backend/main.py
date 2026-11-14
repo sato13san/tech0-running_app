@@ -34,6 +34,19 @@ def health():
     return {"status": "ok", "db": row["db"], "products": row["products"]}
 
 
+@app.get("/api/life-scenes")
+def life_scenes():
+    """有効なライフシーンの一覧をlifeScenesに入れて返す。"""
+    return {"lifeScenes": fetch_all(
+        # ASでDBの列名をAPIのレスポンスで使う名前に揃える。
+        "SELECT life_scene_id AS id, scene_name AS name, card_label AS cardLabel,"
+        # is_activeが1のシーンだけを取得する。
+        "sort_order AS sortOrder FROM life_scenes WHERE is_active = 1"
+        # sort_order の値が小さいシーンから並べる。同じ値ならシーンIDが小さい方を先にする。
+        "ORDER BY sort_order, life_scene_id"
+    )}
+
+
 @app.get("/api/search")
 def search(
     q: str = Query(default="", description="キーワード（空白区切りで複数。すべてを含む商品）"),
