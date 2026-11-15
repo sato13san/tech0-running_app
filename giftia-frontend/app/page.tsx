@@ -27,7 +27,8 @@ export default function Home() {
       ? { keyword, category, indivWrap: false, priceBand: "" }
       : { keyword: "", category: "", indivWrap, priceBand };
     try {
-      setResults(await searchGifts(condition));
+      const data = await searchGifts(condition);
+      setResults(data.results);
     } catch (err) {
       setResults(null);
       setError(`APIにつながりません：${(err as Error).message}`); // 原因はブラウザの Console に出る
