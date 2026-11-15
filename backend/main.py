@@ -10,7 +10,7 @@
 import os
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, HTTPException  # 【追加】HTTPExceptionを追加
 from fastapi.middleware.cors import CORSMiddleware
 
 from database import fetch_all
@@ -43,8 +43,60 @@ def life_scenes():
         # is_activeが1のシーンだけを取得する。
         "sort_order AS sortOrder FROM life_scenes WHERE is_active = 1"
         # sort_order の値が小さいシーンから並べる。同じ値ならシーンIDが小さい方を先にする。
-        "ORDER BY sort_order, life_scene_id"
+        " ORDER BY sort_order, life_scene_id"
     )}
+
+
+# 【追加】build_whereとcount_matches
+def build_where(q, category, indiv_wrap, price_min, price_max, scene_ids):
+    """商品検索の条件をANDでつなぎ、条件式と%sに入る値を返す。
+    
+    値は条件式に書き込まず、%sの出現順に並べて別に返す。
+    呼び出し元はSQLを実行するときに、SQL文と値をそれぞれ渡す。
+    """
+    where, params = ["stock > 0"], []
+
+    # キーワードは全て一致させる。各単語は商品名・ブランド・説明文の
+    # いずれかに含まれていればよく、単語ごとに一致する項目が違ってもよい。
+    for word in q.split():
+        where.append("(product_name LIKE %s OR brand LIKE %s OR description LIKE %s)")
+        params += [f"%{word}%"] * 3
+    if category:
+        where.append("category = %s")
+        params.append(category)
+    if indiv_wrap:
+        where.append("description LIKE %s")
+        params.append("%個包装%")
+    if price_min is not None:
+        where.append("price >= %s")
+        params.append(price_min)
+    if price_max is not None:
+        where.append("price <= %s")
+        params.append(price_max)
+    if scene_ids:
+        # 指定されたシーンのうち、有効なものに1件でも紐づく商品を対象にする。
+        # 複数のシーンに一致しても検索結果で商品が重複しないよう、EXSISTSで判定する。
+        marks = ",".join(["%s"] * len(scene_ids))
+        where.append(f"""EXISTS (
+            SELECT 1 FROM product_life_scenes pls
+            JOIN life_scenes ls ON ls.life_scene_id = pls.life_scene_id
+            WHERE pls.product_id = products.product_id
+              AND ls.is_active = 1 AND ls.life_scene_id IN ({marks})
+        )""")
+        params.extend(scene_ids)
+
+    return " AND ".join(where), tuple(params)
+
+
+def count_matches(condition):
+    """検索条件に当てはまる商品の件数を返す。"""
+    # conditionの各項目をbuild_whereの引数として渡し、
+    # WHERE句の条件式と、%sに出現順で渡す値を受け取る。
+    where, params = build_where(**condition)
+
+    # 条件に合う商品を COUNT(*) で数える
+    # 集計結果の1行目からn列の値を取り出し、整数にして返す。
+    return int(fetch_all(f"SELECT COUNT(*) AS n FROM products WHERE {where}", params)[0]["n"])
 
 
 @app.get("/api/search")
@@ -55,38 +107,85 @@ def search(
     price_min: int | None = Query(default=None, ge=0, description="価格の下限（以上）"),
     price_max: int | None = Query(default=None, ge=0, description="価格の上限（以下）"),
     limit: int = Query(default=20, ge=1, le=100, description="返す件数"),
+    life_scene_ids: list[str] = Query(default=[]),
 ):
     """条件に合う商品を、人気順（直近1年の販売数）で上位 limit 件返す"""
-    # ① 条件を WHERE に1つずつ足す（値は %s で渡し、SQL の文字列に直接つなげない）
-    where, params = ["stock > 0"], []  # 在庫切れは出さない
-    for word in q.split():  # 【穴1】q を空白で区切って1語ずつにする（文字列のメソッド）
-        where.append("(product_name LIKE %s OR brand LIKE %s OR description LIKE %s)")
-        params += [f"%{word}%"] * 3
-    if category:
-        where.append("category = %s")
-        params.append(category)  # 【穴2】%s に入れる値（受け取ったカテゴリー）
-    if indiv_wrap:
-        where.append("description LIKE %s")  # 「個包装」は列がないので、説明文に書いてあるかで見る
-        params.append("%個包装%")  # 【穴3】「個包装」をどこかに含む、という LIKE のパターン
-    if price_min is not None:
-        where.append("price >= %s")
-        params.append(price_min)
-    if price_max is not None:
-        where.append("price <= %s")
-        params.append(price_max)
-    condition = " AND ".join(where)
+    # 追加：価格の上下限が両方あり、下限が上限を超えている場合は422を返す。
+    if price_min is not None and price_max is not None and price_min > price_max:
+        raise HTTPException(status_code=422, detail = "価格の下限は上限以下にしてください")
 
-    # ② 件数と、人気順の上位 limit 件を取る
-    total = fetch_all(f"SELECT COUNT(*) AS n FROM products WHERE {condition}", tuple(params))[0]["n"]
+    # 追加：受け取った生活シーンIDは、重複を除く前の件数で6件までとする。
+    if len(life_scene_ids) > 6:
+        raise HTTPException(status_code=422, detail="生活シーンは6件以内です")
+
+    # 追加：指定順を保って重複を除き、選択肢APIが返す有効なIDと照合する。
+    # 利用できないIDが1つでもあれば、商品検索に進む前に422を返す。
+    scene_ids = list(dict.fromkeys(life_scene_ids))
+    if scene_ids:
+        active = {r["id"] for r in life_scenes()["lifeScenes"]}
+        if set(scene_ids) - active:
+            raise HTTPException(
+                status_code=422,
+                detail="利用できない生活シーンです。再取得してください",
+            )
+
+    # 変更：search()内にあったWHERE句の組み立てをbuild_where()に移した。
+    # 在庫・キーワード・カテゴリー・個包装・価格に、生活シーンとサイズの条件を加える。
+    # 複数の生活シーンはどれか1つに一致すればよく、他の条件も同時に満たす必要がある。
+    condition = dict(
+        q=q,
+        category=category,
+        indiv_wrap=indiv_wrap,
+        price_min=price_min,
+        price_max=price_max,
+        scene_ids=scene_ids,
+    )
+    where, params = build_where(**condition)
+
+    # 変更：ここに書いていた件数集計をcount_matches()に移した。
+    # 一覧取得と同じ検索条件で、limitを適用する前の総件数を数える。
+    total = count_matches(condition)
+
+    # 変更：商品一覧の取得項目にdescriptionを追加した。
     rows = fetch_all(
-        f"""SELECT product_id, category, brand, product_name, price, rating, review_count
-            FROM products WHERE {condition}
+        f"""SELECT product_id, category, brand, product_name, price, rating, review_count, description
+            FROM products WHERE {where}
             ORDER BY sales_count DESC, product_id
             LIMIT %s""",
         (*params, limit),
     )
-    # ③ DB の行を、画面の Gift 型（1週目）に詰め替えて返す
-    return {"total": total, "results": [to_gift(r) for r in rows]}
+
+    # 追加：一覧に載る商品について、選択された有効な生活シーンとの一致をまとめて取得する。
+    # 1商品ずつSQLを実行すると表示件数に応じて問合せが増えるため、1回にまとめる。
+    labels = {}
+    if rows and scene_ids:
+        # SQLが出てくる順に、先に商品ID、次に生活シーンIDを%sに渡す。
+        marks = ",".join(["%s"] * len(rows))
+        scene_marks = ",".join(["%s"] * len(scene_ids))
+        links = fetch_all(f"""
+            SELECT pls.product_id, ls.life_scene_id AS id, ls.scene_name AS name,
+                ls.card_label AS cardLabel, ls.sort_order AS sortOrder
+            FROM product_life_scenes pls
+            JOIN life_scenes ls ON ls.life_scene_id = pls.life_scene_id
+            WHERE pls.product_id IN ({marks}) AND ls.is_active = 1 AND ls.life_scene_id IN ({scene_marks})
+            ORDER BY ls.sort_order, ls.life_scene_id
+        """, (*[r["product_id"] for r in rows], *scene_ids))
+
+        # 商品IDを振り分けに使い、各商品に付ける一致理由の一覧を作る。
+        for link in links:
+            product_id = link.pop("product_id")
+            labels.setdefault(product_id, []).append(link)
+
+    # 変更：to_gift()が返す基本情報に、説明文・一致理由を追加する。
+    results = []
+    for row in rows:
+        gift = to_gift(row)
+        gift["description"] = row["description"] or ""
+        gift["lifeScenes"] = labels.get(row["product_id"], [])
+        # DBの1/0はtrue/falseに変換し、未判定のNullはNullとして返す。
+        results.append(gift)
+
+    return {"total": total, "results": results}
 
 
 def to_gift(r: dict) -> dict:
