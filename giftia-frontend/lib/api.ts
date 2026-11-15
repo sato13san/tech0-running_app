@@ -4,7 +4,14 @@
 // 答えは 配布コード/答え合わせ/frontend/api.ts（自分で埋めてから見る）。
 
 // 画面が使う商品の形。1週目と同じ（画面・ResultCard は変えない）
+export type LifeScene = { id: string; name: string; cardLabel: string; sortOrder: number };
+export type Relaxation = { key: string; label: string; total: number };
+export type SearchResponse = { total: number; results: Gift[]; relaxations: Relaxation[]; logSaved?: boolean };
+
 export type Gift = {
+  description: string;
+  lifeScenes: LifeScene[];
+  isSizeFree?: boolean | null;
   id: string;          // 商品ID（例 G0001）
   category: string;    // カテゴリ
   brand: string;       // ブランド・店名
@@ -16,6 +23,11 @@ export type Gift = {
 
 // 画面から渡す検索条件（2つのタブの分をまとめて持つ）
 export type SearchCondition = {
+  lifeSceneIds?: string[];
+  sizeFree?: boolean;
+  priceMin?: number;
+  priceMax?: number;
+  sessionKey?: string;
   keyword: string;    // いまの検索：キーワード
   category: string;   // いまの検索：カテゴリー（空ならすべて）
   indivWrap: boolean; // 取引先へのお礼：個包装だけ
@@ -25,8 +37,8 @@ export type SearchCondition = {
 // API の場所。NEXT_PUBLIC_ の値はブラウザに配られる＝秘密は置かない（.env.local に書く）
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
-// 入力した条件をサーバー（FastAPI）に送り、結果（Gift の配列）をもらう
-export async function searchGifts(c: SearchCondition): Promise<Gift[]> {
+// 入力した条件をサーバー（FastAPI）に送り、結果と総件数（SearchResponse）をもらう
+export async function searchGifts(c: SearchCondition): Promise<SearchResponse> {
   // ① 条件を URL のクエリ（?q=...&category=...）に組み立てる。空の条件は送らない
   const params = new URLSearchParams();
   if (c.keyword) params.set("q", c.keyword);
@@ -35,11 +47,13 @@ export async function searchGifts(c: SearchCondition): Promise<Gift[]> {
   if (c.priceBand === "3000") { params.set("price_min", "3000"); params.set("price_max", "4999"); } // 3,000以上 5,000未満
   if (c.priceBand === "5000") { params.set("price_min", "5000"); params.set("price_max", "9999"); } // 5,000以上 10,000未満
 
+  for (const id of c.lifeSceneIds ?? []) params.append("life_scene_ids", id);
+  if (c.sizeFree) params.set("size_free", "true");
   // ② fetch で API を呼ぶ（通信が終わるまで待つ＝await）
-  const res = await fetch(`${API}/api/search?${params.toString()}`);
+  const res = await fetch(`${API}/api/search?${params.toString()}`, { cache: "no-store" });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
-  // ③ 返ってきた JSON を読む。{ total, results } の results が Gift の配列
+  // ③ 返ってきた JSON 全体を返す。画面は data.results と data.total を使う
   const data = await res.json();
-  return data.results;
+  return data as SearchResponse;
 }
