@@ -48,7 +48,8 @@ def life_scenes():
 
 
 # 【追加】build_whereとcount_matches
-def build_where(q, category, indiv_wrap, price_min, price_max, scene_ids):
+# 追加：サイズ不要
+def build_where(q, category, indiv_wrap, price_min, price_max, scene_ids, size_free=False):
     """商品検索の条件をANDでつなぎ、条件式と%sに入る値を返す。
     
     値は条件式に書き込まず、%sの出現順に並べて別に返す。
@@ -75,7 +76,7 @@ def build_where(q, category, indiv_wrap, price_min, price_max, scene_ids):
         params.append(price_max)
     if scene_ids:
         # 指定されたシーンのうち、有効なものに1件でも紐づく商品を対象にする。
-        # 複数のシーンに一致しても検索結果で商品が重複しないよう、EXSISTSで判定する。
+        # 複数のシーンに一致しても検索結果で商品が重複しないよう、EXISTSで判定する。
         marks = ",".join(["%s"] * len(scene_ids))
         where.append(f"""EXISTS (
             SELECT 1 FROM product_life_scenes pls
@@ -84,6 +85,11 @@ def build_where(q, category, indiv_wrap, price_min, price_max, scene_ids):
               AND ls.is_active = 1 AND ls.life_scene_id IN ({marks})
         )""")
         params.extend(scene_ids)
+    # 追加：サイズ選び不要のフラグ反映
+    # サイズ選び不要を指定されたときは、DBで「不要」と判定済みの商品だけに絞る。
+    # is_size_free が 0（サイズ選びが必要）または NULL（未判定）の商品は対象外。
+    if size_free:
+        where.append("is_size_free = 1")
 
     return " AND ".join(where), tuple(params)
 
@@ -108,6 +114,7 @@ def search(
     price_max: int | None = Query(default=None, ge=0, description="価格の上限（以下）"),
     limit: int = Query(default=20, ge=1, le=100, description="返す件数"),
     life_scene_ids: list[str] = Query(default=[]),
+    size_free: bool = Query(default=False),  # 追加：サイズ選び不要
 ):
     """条件に合う商品を、人気順（直近1年の販売数）で上位 limit 件返す"""
     # 追加：価格の上下限が両方あり、下限が上限を超えている場合は422を返す。
@@ -140,6 +147,7 @@ def search(
         price_max=price_max,
         scene_ids=scene_ids,
     )
+    condition["size_free"] = size_free  # 追加：サイズ不要
     where, params = build_where(**condition)
 
     # 変更：ここに書いていた件数集計をcount_matches()に移した。
@@ -148,7 +156,8 @@ def search(
 
     # 変更：商品一覧の取得項目にdescriptionを追加した。
     rows = fetch_all(
-        f"""SELECT product_id, category, brand, product_name, price, rating, review_count, description
+        # 追加：サイズ選び不要
+        f"""SELECT product_id, category, brand, product_name, price, rating, review_count, description, is_size_free
             FROM products WHERE {where}
             ORDER BY sales_count DESC, product_id
             LIMIT %s""",
@@ -183,6 +192,7 @@ def search(
         gift["description"] = row["description"] or ""
         gift["lifeScenes"] = labels.get(row["product_id"], [])
         # DBの1/0はtrue/falseに変換し、未判定のNullはNullとして返す。
+        gift["isSizeFree"] = None if row["is_size_free"] is None else bool(row["is_size_free"])
         results.append(gift)
 
     return {"total": total, "results": results}
