@@ -13,11 +13,16 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Query, HTTPException  # 【追加】HTTPExceptionを追加
 from fastapi.middleware.cors import CORSMiddleware
 
-from database import fetch_all
+# FR-10（検索ログの匿名保存）で追加
+from database import fetch_all, execute_write
+import json
+import logging
+from uuid import UUID, uuid4
+from pymysql import MySQLError
 
 load_dotenv()  # .env を読む（DB の接続情報・CORS の許可）
 
-app = FastAPI(title="Giftia Search API（2週目）")
+app = FastAPI(title="Giftia Search API（Phase1）")
 
 # ── CORS ───────────────────────────────────────
 # 画面（http://localhost:3000）と API（http://localhost:8000）は別のアプリ＝オリジンが違う。
@@ -115,6 +120,7 @@ def search(
     limit: int = Query(default=20, ge=1, le=100, description="返す件数"),
     life_scene_ids: list[str] = Query(default=[]),
     size_free: bool = Query(default=False),  # 追加：サイズ選び不要
+    session_key : UUID | None = Query(default=None),  # 追加：匿名のセッションキー
 ):
     """条件に合う商品を、人気順（直近1年の販売数）で上位 limit 件返す"""
     # 追加：価格の上下限が両方あり、下限が上限を超えている場合は422を返す。
@@ -194,8 +200,49 @@ def search(
         # DBの1/0はtrue/falseに変換し、未判定のNullはNullとして返す。
         gift["isSizeFree"] = None if row["is_size_free"] is None else bool(row["is_size_free"])
         results.append(gift)
+    # 追加：検索結果をまとめる。条件を緩める提案は、必要なときだけ後で追加する。
+    response = {"total": total, "results": results, "relaxations": []}
 
-    return {"total": total, "results": results}
+    # 0件だったときだけ、指定され他条件を1種類ずつ外す候補を作る。
+    if total == 0:
+        candidates = []
+        if price_min is not None or price_max is not None:
+            # 価格条件を外すときは、下限と上限の両方を解除する。
+            candidates.append(("price", "価格条件", dict(price_min=None, price_max=None)))
+        if scene_ids:
+            candidates.append(("lifeScenes", "生活シーン", dict(scene_ids=[])))
+        if size_free:
+            candidates.append(("sizeFree", "サイズ選び不要", dict(size_free=False)))
+        if category:
+            candidates.append(("category", "カテゴリー", dict(category="")))
+        if q.strip():
+            candidates.append(("keyword", "キーワード", dict(q="")))
+        if indiv_wrap:
+            candidates.append(("indivWrap", "個包装", dict(indiv_wrap=False)))
+
+        for key, label, change in candidates:
+            # 元の検索条件を保ち、今回外す条件だけを上書きして件数を数える。
+            # 検索APIを呼びなおさないので、候補を調べても検索ログは増えない。
+            n = count_matches({**condition, **change})
+            if n > 0:
+                # 商品が1件以上見つかる候補だけを画面に返す。
+                response["relaxations"].append({"key": key, "label": label, "total": n})
+
+    # ユーザーが実際に行った検索を1回分だけ記録する。
+    # 生の検索キーワード、ユーザーID、IPアドレス、ユーザーエージェントは保存しない。
+    try:
+        # 匿名キーが渡されていなければ、新しいUUIDを発行する。
+        execute_write(
+            "INSERT INTO search_logs (session_key, life_scene_ids, size_free, result_count) "
+            "VALUES (%s, %s, %s, %s)",
+            (str(session_key or uuid4()), json.dumps(scene_ids), int(size_free), total)
+        )
+        response["logSaved"] = True
+    except MySQLError:
+        # ログ保存に失敗しても検索結果は返す。保存の成否はlogSavedで伝える。
+        logging.getLogger(__name__).warning("search_log_write_failed")
+        response["logSaved"] = False
+    return response
 
 
 def to_gift(r: dict) -> dict:
