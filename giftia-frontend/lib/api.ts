@@ -57,3 +57,13 @@ export async function searchGifts(c: SearchCondition): Promise<SearchResponse> {
   const data = await res.json();
   return data as SearchResponse;
 }
+
+// 生活シーンの選択肢をバックエンドから取得する関数
+export async function getLifeScenes(): Promise<LifeScene[]> {
+  const res = await fetch(`${API}/api/life-scenes`, { cache: "no-store" });
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status}: Failed to fetch life scenes`);
+  }
+  const data = await res.json();
+  return data.lifeScenes;
+}
