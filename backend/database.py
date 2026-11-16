@@ -49,3 +49,19 @@ def fetch_all(query: str, params: tuple = ()) -> list[dict]:
             return cur.fetchall()
     finally:
         conn.close()
+
+
+def execute_write(query: str, params: tuple = ()) -> int:
+    """INSERT/UPDATE専用。成功時commit、失敗時rollback、必ずclose"""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(query, params)
+            affected = cur.rowcount
+        conn.commit()
+        return affected
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
