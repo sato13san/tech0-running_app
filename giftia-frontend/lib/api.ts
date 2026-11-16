@@ -65,5 +65,5 @@ export async function getLifeScenes(): Promise<LifeScene[]> {
     throw new Error(`HTTP ${res.status}: Failed to fetch life scenes`);
   }
   const data = await res.json();
-  return data as LifeScene[];
+  return data.lifeScenes;
 }
