@@ -3,3 +3,6 @@
 # 仮想環境・キャッシュは機械が作るもの
 .venv/
 __pycache__/
+
+# Azureでのデプロイのために追加
+function_app.py
