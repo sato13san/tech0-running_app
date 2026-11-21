@@ -49,7 +49,10 @@ export async function searchGifts(c: SearchCondition): Promise<SearchResponse> {
 
   for (const id of c.lifeSceneIds ?? []) params.append("life_scene_ids", id);
   if (c.sizeFree) params.set("size_free", "true");
-  // ② fetch で API を呼ぶ（通信が終わるまで待つ＝await）
+  if (c.priceMin !== undefined) params.set("price_min", String(c.priceMin));
+  if (c.priceMax !== undefined) params.set("price_max", String(c.priceMax));
+  if (c.sessionKey) params.set("session_key", c.sessionKey);
+    // ② fetch で API を呼ぶ（通信が終わるまで待つ＝await）
   const res = await fetch(`${API}/api/search?${params.toString()}`, { cache: "no-store" });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
 

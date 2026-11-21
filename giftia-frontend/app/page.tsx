@@ -6,7 +6,7 @@
 
 import { useState, useEffect, useRef } from "react";
 import ResultCard from "./ResultCard";
-import { searchGifts, getLifeScenes, type Gift, type LifeScene, type SearchCondition } from "@/lib/api";
+import { searchGifts, getLifeScenes, type Gift, type LifeScene, type SearchCondition, type Relaxation } from "@/lib/api";
 
 export default function Home() {
   // ① 状態（変化するデータ）を覚える箱
@@ -28,6 +28,11 @@ export default function Home() {
   const [applied, setApplied] = useState("");
   const requestId = useRef(0);
   const [sizeFree, setSizeFree] = useState(false);
+  const [priceMin, setPriceMin] = useState("");
+  const [priceMax, setPriceMax] = useState("");
+  const [relaxations, setRelaxations] = useState<Relaxation[]>([]);
+  const [logSaved, setLogSaved] = useState(true);
+  const sessionKey = useRef("");
   async function loadScenes() {
     setSceneLoading(true);
     setSceneError("");
@@ -50,12 +55,14 @@ export default function Home() {
       condition.priceBand === "5000" ? "5,000円以上10,000円未満" : "",
       ...(condition.lifeSceneIds ?? []).map(x => scenes.find(s => s.id === x)?.name ?? x),
       condition.sizeFree ? "サイズ選び不要" : "",
+      condition.priceMin !== undefined ? `${condition.priceMin.toLocaleString()}円以上` : "",
+      condition.priceMax !== undefined ? `${condition.priceMax.toLocaleString()}円以下` : "",
     ].filter(Boolean).join(" ／ ") || "指定なし";
     try {
       const data = await searchGifts(condition);
       if (id !== requestId.current) return;
       setResults(data.results); setTotal(data.total); setApplied(labels);
-      // EXTRA_RESULT
+      setRelaxations(data.relaxations); setLogSaved(data.logSaved !== false);
     } catch (err) {
       if (id !== requestId.current) return;
       setResults(null); setError(`検索できませんでした。条件を確認して再試行してください：${(err as Error).message}`);
@@ -64,14 +71,30 @@ export default function Home() {
 
   async function onSearch(e: React.FormEvent) {
     e.preventDefault();
-    // EXTRA_VALIDATION
+    if (mode === "standard" && priceMin !== "" && priceMax !== "" && Number(priceMin) > Number(priceMax)) {
+      setError("価格の下限は上限以下にしてください"); return;
+    }
     const condition: SearchCondition = mode === "standard"
       ? { keyword, category, indivWrap: false, priceBand: "", lifeSceneIds }
       : { keyword: "", category: "", indivWrap, priceBand, lifeSceneIds: [] };
-    if (mode === "standard") condition.sizeFree = sizeFree;
+    if (mode === "standard") {
+      condition.sizeFree = sizeFree;
+      condition.priceMin = priceMin === "" ? undefined : Number(priceMin);
+      condition.priceMax = priceMax === "" ? undefined : Number(priceMax);
+    }
+    // Session key is random, tab-scoped; storage failure falls back to memory.
+    if (!sessionKey.current) {
+      try {
+        const stored = sessionStorage.getItem("giftia_session");
+        sessionKey.current = stored && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(stored) ? stored : crypto.randomUUID();
+        sessionStorage.setItem("giftia_session", sessionKey.current);
+      } catch { sessionKey.current = crypto.randomUUID(); }
+    }
+    condition.sessionKey = sessionKey.current;
     await runSearch(condition);
   }
 
+  // ③ 画面
   return (
     <main className="page">
       <header className="header"><h1>Giftia</h1></header>
@@ -97,6 +120,8 @@ export default function Home() {
             </fieldset>
             {sceneError && <p role="alert">{sceneError}<button type="button" onClick={() => void loadScenes()}>再取得</button></p>}
             <label className="chk"><input type="checkbox" checked={sizeFree} onChange={e => setSizeFree(e.target.checked)} />サイズ選び不要</label>
+            <label>価格下限（円）<input type="number" min="0" step="1" value={priceMin} onChange={e => setPriceMin(e.target.value)} /></label>
+            <label>価格上限（円）<input type="number" min="0" step="1" value={priceMax} onChange={e => setPriceMax(e.target.value)} /></label>
             <input className="q" value={keyword} onChange={(e) => setKeyword(e.target.value)} placeholder="キーワード（例：送別 お菓子）" />
             <select value={category} onChange={(e) => setCategory(e.target.value)}>
               <option value="">すべてのカテゴリー</option>
@@ -126,7 +151,12 @@ export default function Home() {
           <p className="summary">適用条件：{applied}</p>
           <p className="summary" aria-live="polite">該当 {total} 件 ／ 上位 {results.length} 件</p>
           {total === 0 && <p>条件に合う商品が見つかりませんでした。</p>}
-          {/* EXTRA_EMPTY */}
+          {total === 0 && <div>
+            {relaxations.map(r => <p key={r.key}>{r.label}を外すと {r.total} 件見つかります。</p>)}
+            {relaxations.length === 0 && <p>1つの条件を外すだけでは候補が増えません。入力欄で条件を見直して、検索してください。</p>}
+            <p>条件は自動変更していません。</p>
+          </div>}
+          {!logSaved && <p role="status">検索結果は取得しましたが、利用記録を保存できませんでした。</p>}
           <div className="grid">
             {results.map((g, i) => <ResultCard key={g.id} gift={g} rank={i + 1} />)}
           </div>
