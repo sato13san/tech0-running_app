@@ -168,20 +168,25 @@ def search(
         condition["size_free"] = size_free  # 追加：サイズ不要
         where, params = build_where(**condition)
 
-        # 変更：ここに書いていた件数集計をcount_matches()に移した。
-        # 一覧取得と同じ検索条件で、limitを適用する前の総件数を数える。
-        total = count_matches(condition, conn=conn)
+        # 【PR-14・変更】通常検索のCOUNTを別に実行せず、一覧SELECTへまとめる。
+        # COUNT(*) OVER()はWHERE適用後・LIMIT適用前の件数を各行に付ける。
+        # 条件緩和は検索条件が異なるため、下のcount_matchesは残す。
 
         # 変更：商品一覧の取得項目にdescriptionを追加した。
         rows = fetch_all(
             # 追加：サイズ選び不要
             # todo: 候補の並び順を変えなくても良いか要検討
-            f"""SELECT product_id, category, brand, product_name, price, rating, review_count, description, is_size_free
+            f"""SELECT product_id, category, brand, product_name, price, rating, review_count, description, is_size_free,
+                COUNT(*) OVER() AS total_count
                 FROM products WHERE {where}
                 ORDER BY sales_count DESC, product_id
                 LIMIT %s""",
             (*params, limit), conn=conn,
         )
+
+        # 【PR-14・追加】0件なら先頭行はないので0を使い、添字エラーを防ぐ。
+        # 上位20件でもtotalは全一致件数。この例はOFFSETなしの検索用。
+        total = int(rows[0]["total_count"]) if rows else 0
 
         # 追加：一覧に載る商品について、選択された有効な生活シーンとの一致をまとめて取得する。
         # 1商品ずつSQLを実行すると表示件数に応じて問合せが増えるため、1回にまとめる。
@@ -251,6 +256,7 @@ def search(
                 "VALUES (%s, %s, %s, %s)",
                 (str(session_key or uuid4()), json.dumps(scene_ids), int(size_free), total), conn=conn
             )
+            response["logSaved"] = True  # 【PR-14・追加】PR-13の修正漏れ対応
             
         except MySQLError:
             # ログ保存に失敗しても検索結果は返す。保存の成否はlogSavedで伝える。
