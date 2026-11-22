@@ -14,7 +14,7 @@ from fastapi import FastAPI, Query, HTTPException  # 【追加】HTTPException�
 from fastapi.middleware.cors import CORSMiddleware
 
 # FR-10（検索ログの匿名保存）で追加
-from database import fetch_all, execute_write
+from database import fetch_all, execute_write, get_connection
 import json
 import logging
 from uuid import UUID, uuid4
@@ -41,15 +41,21 @@ def health():
 
 @app.get("/api/life-scenes")
 def life_scenes():
+    return {"lifeScenes": fetch_life_scenes()}
+
+
+# 【PR-13・追加】公開APIの引数・返却形式は変えず、DB取得を共通関数へ分ける。
+# 検索からはconnを渡し、単独APIからは省略する。
+def fetch_life_scenes(conn=None):
     """有効なライフシーンの一覧をlifeScenesに入れて返す。"""
-    return {"lifeScenes": fetch_all(
+    return fetch_all(
         # ASでDBの列名をAPIのレスポンスで使う名前に揃える。
         "SELECT life_scene_id AS id, scene_name AS name, card_label AS cardLabel,"
         # is_activeが1のシーンだけを取得する。
         "sort_order AS sortOrder FROM life_scenes WHERE is_active = 1"
         # sort_order の値が小さいシーンから並べる。同じ値ならシーンIDが小さい方を先にする。
         " ORDER BY sort_order, life_scene_id"
-    )}
+    , conn=conn)
 
 
 # 【追加】build_whereとcount_matches
@@ -99,7 +105,7 @@ def build_where(q, category, indiv_wrap, price_min, price_max, scene_ids, size_f
     return " AND ".join(where), tuple(params)
 
 
-def count_matches(condition):
+def count_matches(condition, conn=None):
     """検索条件に当てはまる商品の件数を返す。"""
     # conditionの各項目をbuild_whereの引数として渡し、
     # WHERE句の条件式と、%sに出現順で渡す値を受け取る。
@@ -107,7 +113,8 @@ def count_matches(condition):
 
     # 条件に合う商品を COUNT(*) で数える
     # 集計結果の1行目からn列の値を取り出し、整数にして返す。
-    return int(fetch_all(f"SELECT COUNT(*) AS n FROM products WHERE {where}", params)[0]["n"])
+    # 【PR-13・変更】条件緩和の件数も、検索が開いた同じconnで調べる。
+    return int(fetch_all(f"SELECT COUNT(*) AS n FROM products WHERE {where}", params, conn=conn)[0]["n"])
 
 
 @app.get("/api/search")
@@ -133,116 +140,126 @@ def search(
 
     # 追加：指定順を保って重複を除き、選択肢APIが返す有効なIDと照合する。
     # 利用できないIDが1つでもあれば、商品検索に進む前に422を返す。
-    scene_ids = list(dict.fromkeys(life_scene_ids))
-    if scene_ids:
-        active = {r["id"] for r in life_scenes()["lifeScenes"]}
-        if set(scene_ids) - active:
-            raise HTTPException(
-                status_code=422,
-                detail="利用できない生活シーンです。再取得してください",
-            )
-
-    # 変更：search()内にあったWHERE句の組み立てをbuild_where()に移した。
-    # 在庫・キーワード・カテゴリー・個包装・価格に、生活シーンとサイズの条件を加える。
-    # 複数の生活シーンはどれか1つに一致すればよく、他の条件も同時に満たす必要がある。
-    condition = dict(
-        q=q,
-        category=category,
-        indiv_wrap=indiv_wrap,
-        price_min=price_min,
-        price_max=price_max,
-        scene_ids=scene_ids,
-    )
-    condition["size_free"] = size_free  # 追加：サイズ不要
-    where, params = build_where(**condition)
-
-    # 変更：ここに書いていた件数集計をcount_matches()に移した。
-    # 一覧取得と同じ検索条件で、limitを適用する前の総件数を数える。
-    total = count_matches(condition)
-
-    # 変更：商品一覧の取得項目にdescriptionを追加した。
-    rows = fetch_all(
-        # 追加：サイズ選び不要
-        f"""SELECT product_id, category, brand, product_name, price, rating, review_count, description, is_size_free
-            FROM products WHERE {where}
-            ORDER BY sales_count DESC, product_id
-            LIMIT %s""",
-        (*params, limit),
-    )
-
-    # 追加：一覧に載る商品について、選択された有効な生活シーンとの一致をまとめて取得する。
-    # 1商品ずつSQLを実行すると表示件数に応じて問合せが増えるため、1回にまとめる。
-    labels = {}
-    if rows and scene_ids:
-        # SQLが出てくる順に、先に商品ID、次に生活シーンIDを%sに渡す。
-        marks = ",".join(["%s"] * len(rows))
-        scene_marks = ",".join(["%s"] * len(scene_ids))
-        links = fetch_all(f"""
-            SELECT pls.product_id, ls.life_scene_id AS id, ls.scene_name AS name,
-                ls.card_label AS cardLabel, ls.sort_order AS sortOrder
-            FROM product_life_scenes pls
-            JOIN life_scenes ls ON ls.life_scene_id = pls.life_scene_id
-            WHERE pls.product_id IN ({marks}) AND ls.is_active = 1 AND ls.life_scene_id IN ({scene_marks})
-            ORDER BY ls.sort_order, ls.life_scene_id
-        """, (*[r["product_id"] for r in rows], *scene_ids))
-
-        # 商品IDを振り分けに使い、各商品に付ける一致理由の一覧を作る。
-        for link in links:
-            product_id = link.pop("product_id")
-            labels.setdefault(product_id, []).append(link)
-
-    # 変更：to_gift()が返す基本情報に、説明文・一致理由を追加する。
-    results = []
-    for row in rows:
-        gift = to_gift(row)
-        gift["description"] = row["description"] or ""
-        gift["lifeScenes"] = labels.get(row["product_id"], [])
-        # DBの1/0はtrue/falseに変換し、未判定のNullはNullとして返す。
-        gift["isSizeFree"] = None if row["is_size_free"] is None else bool(row["is_size_free"])
-        results.append(gift)
-    # 追加：検索結果をまとめる。条件を緩める提案は、必要なときだけ後で追加する。
-    response = {"total": total, "results": results, "relaxations": []}
-
-    # 0件だったときだけ、指定され他条件を1種類ずつ外す候補を作る。
-    if total == 0:
-        candidates = []
-        if price_min is not None or price_max is not None:
-            # 価格条件を外すときは、下限と上限の両方を解除する。
-            candidates.append(("price", "価格条件", dict(price_min=None, price_max=None)))
-        if scene_ids:
-            candidates.append(("lifeScenes", "生活シーン", dict(scene_ids=[])))
-        if size_free:
-            candidates.append(("sizeFree", "サイズ選び不要", dict(size_free=False)))
-        if category:
-            candidates.append(("category", "カテゴリー", dict(category="")))
-        if q.strip():
-            candidates.append(("keyword", "キーワード", dict(q="")))
-        if indiv_wrap:
-            candidates.append(("indivWrap", "個包装", dict(indiv_wrap=False)))
-
-        for key, label, change in candidates:
-            # 元の検索条件を保ち、今回外す条件だけを上書きして件数を数える。
-            # 検索APIを呼びなおさないので、候補を調べても検索ログは増えない。
-            n = count_matches({**condition, **change})
-            if n > 0:
-                # 商品が1件以上見つかる候補だけを画面に返す。
-                response["relaxations"].append({"key": key, "label": label, "total": n})
-
-    # ユーザーが実際に行った検索を1回分だけ記録する。
-    # 生の検索キーワード、ユーザーID、IPアドレス、ユーザーエージェントは保存しない。
+    # 【PR-13・追加】形式検証がすんだら、この検索専用の接続を1本だけ開く。
+    # シーン確認・件数・商品・表示理由・ログへ同じconnを渡す。
+    # 別のリクエストとは共有しない。
+    conn = get_connection()
     try:
-        # 匿名キーが渡されていなければ、新しいUUIDを発行する。
-        execute_write(
-            "INSERT INTO search_logs (session_key, life_scene_ids, size_free, result_count) "
-            "VALUES (%s, %s, %s, %s)",
-            (str(session_key or uuid4()), json.dumps(scene_ids), int(size_free), total)
+        scene_ids = list(dict.fromkeys(life_scene_ids))
+        if scene_ids:
+            active = {r["id"] for r in fetch_life_scenes(conn)}
+            if set(scene_ids) - active:
+                raise HTTPException(
+                    status_code=422,
+                    detail="利用できない生活シーンです。再取得してください",
+                )
+
+        # 変更：search()内にあったWHERE句の組み立てをbuild_where()に移した。
+        # 在庫・キーワード・カテゴリー・個包装・価格に、生活シーンとサイズの条件を加える。
+        # 複数の生活シーンはどれか1つに一致すればよく、他の条件も同時に満たす必要がある。
+        condition = dict(
+            q=q,
+            category=category,
+            indiv_wrap=indiv_wrap,
+            price_min=price_min,
+            price_max=price_max,
+            scene_ids=scene_ids,
         )
-        response["logSaved"] = True
-    except MySQLError:
-        # ログ保存に失敗しても検索結果は返す。保存の成否はlogSavedで伝える。
-        logging.getLogger(__name__).warning("search_log_write_failed")
-        response["logSaved"] = False
-    return response
+        condition["size_free"] = size_free  # 追加：サイズ不要
+        where, params = build_where(**condition)
+
+        # 変更：ここに書いていた件数集計をcount_matches()に移した。
+        # 一覧取得と同じ検索条件で、limitを適用する前の総件数を数える。
+        total = count_matches(condition, conn=conn)
+
+        # 変更：商品一覧の取得項目にdescriptionを追加した。
+        rows = fetch_all(
+            # 追加：サイズ選び不要
+            # todo: 候補の並び順を変えなくても良いか要検討
+            f"""SELECT product_id, category, brand, product_name, price, rating, review_count, description, is_size_free
+                FROM products WHERE {where}
+                ORDER BY sales_count DESC, product_id
+                LIMIT %s""",
+            (*params, limit), conn=conn,
+        )
+
+        # 追加：一覧に載る商品について、選択された有効な生活シーンとの一致をまとめて取得する。
+        # 1商品ずつSQLを実行すると表示件数に応じて問合せが増えるため、1回にまとめる。
+        labels = {}
+        if rows and scene_ids:
+            # SQLが出てくる順に、先に商品ID、次に生活シーンIDを%sに渡す。
+            marks = ",".join(["%s"] * len(rows))
+            scene_marks = ",".join(["%s"] * len(scene_ids))
+            links = fetch_all(f"""
+                SELECT pls.product_id, ls.life_scene_id AS id, ls.scene_name AS name,
+                    ls.card_label AS cardLabel, ls.sort_order AS sortOrder
+                FROM product_life_scenes pls
+                JOIN life_scenes ls ON ls.life_scene_id = pls.life_scene_id
+                WHERE pls.product_id IN ({marks}) AND ls.is_active = 1 AND ls.life_scene_id IN ({scene_marks})
+                ORDER BY ls.sort_order, ls.life_scene_id
+            """, (*[r["product_id"] for r in rows], *scene_ids), conn=conn)
+
+            # 商品IDを振り分けに使い、各商品に付ける一致理由の一覧を作る。
+            for link in links:
+                product_id = link.pop("product_id")
+                labels.setdefault(product_id, []).append(link)
+
+        # 変更：to_gift()が返す基本情報に、説明文・一致理由を追加する。
+        results = []
+        for row in rows:
+            gift = to_gift(row)
+            gift["description"] = row["description"] or ""
+            gift["lifeScenes"] = labels.get(row["product_id"], [])
+            # DBの1/0はtrue/falseに変換し、未判定のNullはNullとして返す。
+            gift["isSizeFree"] = None if row["is_size_free"] is None else bool(row["is_size_free"])
+            results.append(gift)
+        # 追加：検索結果をまとめる。条件を緩める提案は、必要なときだけ後で追加する。
+        response = {"total": total, "results": results, "relaxations": []}
+
+        # 0件だったときだけ、指定され他条件を1種類ずつ外す候補を作る。
+        # todo: 閾値を0件にするか、緩和条件の優先度変更を検討
+        if total == 0:
+            candidates = []
+            if price_min is not None or price_max is not None:
+                # 価格条件を外すときは、下限と上限の両方を解除する。
+                candidates.append(("price", "価格条件", dict(price_min=None, price_max=None)))
+            if scene_ids:
+                candidates.append(("lifeScenes", "生活シーン", dict(scene_ids=[])))
+            if size_free:
+                candidates.append(("sizeFree", "サイズ選び不要", dict(size_free=False)))
+            if category:
+                candidates.append(("category", "カテゴリー", dict(category="")))
+            if q.strip():
+                candidates.append(("keyword", "キーワード", dict(q="")))
+            if indiv_wrap:
+                candidates.append(("indivWrap", "個包装", dict(indiv_wrap=False)))
+
+            for key, label, change in candidates:
+                # 元の検索条件を保ち、今回外す条件だけを上書きして件数を数える。
+                # 検索APIを呼びなおさないので、候補を調べても検索ログは増えない。
+                n = count_matches({**condition, **change}, conn=conn)
+                if n > 0:
+                    # 商品が1件以上見つかる候補だけを画面に返す。
+                    response["relaxations"].append({"key": key, "label": label, "total": n})
+
+        # ユーザーが実際に行った検索を1回分だけ記録する。
+        # 生の検索キーワード、ユーザーID、IPアドレス、ユーザーエージェントは保存しない。
+        try:
+            # 匿名キーが渡されていなければ、新しいUUIDを発行する。
+            execute_write(
+                "INSERT INTO search_logs (session_key, life_scene_ids, size_free, result_count) "
+                "VALUES (%s, %s, %s, %s)",
+                (str(session_key or uuid4()), json.dumps(scene_ids), int(size_free), total), conn=conn
+            )
+            
+        except MySQLError:
+            # ログ保存に失敗しても検索結果は返す。保存の成否はlogSavedで伝える。
+            logging.getLogger(__name__).warning("search_log_write_failed")
+            response["logSaved"] = False
+        return response
+    finally:
+        # 【PR-13・追加】成功・入力不正・DB例外のいずれでも最後に閉じる。
+        conn.close()
 
 
 def to_gift(r: dict) -> dict:
