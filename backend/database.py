@@ -39,29 +39,44 @@ def get_connection():
     )
 
 
-def fetch_all(query: str, params: tuple = ()) -> list[dict]:
-    """SELECT を実行して、行を dict のリストで返す。
-    値は params で渡す（SQL の中の %s に入る）。文字列に直接つなげると、入力次第で DB を壊される。"""
-    conn = get_connection()
+def fetch_all(query: str, params: tuple = (), *, conn=None) -> list[dict]:
+    """自分で開いた接続だけを閉じる。借りた接続は呼び出し元へ返す。"""
+    # 【PR-13・変更】接続を借りたか、自分で開いたかを覚える。
+    # conn省略時は従来の単独呼び出しと同じ動きにする。
+    owns_connection = conn is None
+    if owns_connection:
+        conn = get_connection()
     try:
         with conn.cursor() as cur:
             cur.execute(query, params)
             return cur.fetchall()
     finally:
-        conn.close()
+        # 【PR-13・変更】借りた接続は後続処理も使うため、ここでは閉じない。
+        if owns_connection:
+            conn.close()
 
 
-def execute_write(query: str, params: tuple = ()) -> int:
-    """INSERT/UPDATE専用。成功時commit、失敗時rollback、必ずclose"""
-    conn = get_connection()
+def execute_write(query: str, params: tuple = (), *, conn=None) -> int:
+    """成功時commit、失敗時rollback。共有接続では検索ログだけを書き込む。"""
+    owns_connection = conn is None
+    if owns_connection:
+        conn = get_connection()
     try:
         with conn.cursor() as cur:
             cur.execute(query, params)
             affected = cur.rowcount
+        # 【維持】ログの保存を確定する。共有接続に他の業務更新を混ぜない
         conn.commit()
         return affected
     except Exception:
         conn.rollback()
+        # 切断時にrollbackも失敗して元の例外を隠さないようにする。
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         raise
     finally:
-        conn.close()
+        # 【PR-13・変更】借りた接続は後続処理も使うため、ここでは閉じない。
+        if owns_connection:
+            conn.close()
