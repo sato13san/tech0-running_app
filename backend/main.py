@@ -89,8 +89,8 @@ def build_where(q, category, indiv_wrap, price_min, price_max, scene_ids, size_f
         where.append("products.category_id = %s")
         params.append(category_id)
     if indiv_wrap:
-        where.append("description LIKE %s")
-        params.append("%個包装%")
+        # 個包装ありと確認済みの商品だけを対象にする（0・NULLは除外）。
+        where.append("products.is_individually_wrapped = 1")
     if price_min is not None:
         where.append("price >= %s")
         params.append(price_min)
@@ -135,7 +135,7 @@ def search(
     category: str = Query(default="", description="カテゴリー（空ならすべて）"),
     # 【PR-16・追加】新画面はIDを送る。旧category（名称）も引き続き受け付ける。
     category_id: int | None = Query(default=None, ge=1),
-    indiv_wrap: bool = Query(default=False, description="true なら、説明文に「個包装」とある商品だけ"),
+    indiv_wrap: bool = Query(default=False, description="true なら、個包装ありと確認済みの商品だけ"),
     price_min: int | None = Query(default=None, ge=0, description="価格の下限（以上）"),
     price_max: int | None = Query(default=None, ge=0, description="価格の上限（以下）"),
     limit: int = Query(default=20, ge=1, le=100, description="返す件数"),
