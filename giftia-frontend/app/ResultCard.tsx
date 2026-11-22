@@ -10,7 +10,11 @@ export default function ResultCard({ gift, rank }: { gift: Gift; rank: number })
       <div className="badges">{gift.lifeScenes.map(s => <span key={s.id} className="badge">{s.cardLabel}</span>)}</div>
       {gift.isSizeFree === true && <span className="badge">サイズ選び不要</span>}
       <p className="price">{gift.price.toLocaleString()}円</p>
-      <p className="meta">評価{gift.rating}（{gift.reviewCount}件）</p>
+      <p className="meta">
+        {gift.rating === null
+          ? "評価なし"
+          : `評価 ${gift.rating}（${gift.reviewCount}件）`}
+      </p>
     </div>
   );
 }
