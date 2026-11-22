@@ -39,6 +39,16 @@ def health():
     return {"status": "ok", "db": row["db"], "products": row["products"]}
 
 
+@app.get("/api/categories")
+def categories():
+    # 【PR-16・追加】IDは識別用、sort_orderは並び替え用。名称と順番をDBから返す。
+    # この単独APIではfetch_allが接続を開いて閉じる。
+    return {"categories": fetch_all(
+        "SELECT category_id AS id, category_name AS name, sort_order AS sortOrder "
+        "FROM product_category ORDER BY sort_order, category_id"
+    )}
+
+
 @app.get("/api/life-scenes")
 def life_scenes():
     return {"lifeScenes": fetch_life_scenes()}
@@ -60,7 +70,7 @@ def fetch_life_scenes(conn=None):
 
 # 【追加】build_whereとcount_matches
 # 追加：サイズ不要
-def build_where(q, category, indiv_wrap, price_min, price_max, scene_ids, size_free=False):
+def build_where(q, category, indiv_wrap, price_min, price_max, scene_ids, size_free=False, category_id=None):
     """商品検索の条件をANDでつなぎ、条件式と%sに入る値を返す。
     
     値は条件式に書き込まず、%sの出現順に並べて別に返す。
@@ -73,9 +83,11 @@ def build_where(q, category, indiv_wrap, price_min, price_max, scene_ids, size_f
     for word in q.split():
         where.append("(product_name LIKE %s OR brand LIKE %s OR description LIKE %s)")
         params += [f"%{word}%"] * 3
-    if category:
-        where.append("category = %s")
-        params.append(category)
+    # 【PR-16・変更】旧名称も入口でIDに変換済み。検索と緩和で同じ条件を使う。
+    # category引数は既存呼出形式との互換用。値はSQLに埋め込まず%sへ渡す。
+    if category_id is not None:
+        where.append("products.category_id = %s")
+        params.append(category_id)
     if indiv_wrap:
         where.append("description LIKE %s")
         params.append("%個包装%")
@@ -121,6 +133,8 @@ def count_matches(condition, conn=None):
 def search(
     q: str = Query(default="", description="キーワード（空白区切りで複数。すべてを含む商品）"),
     category: str = Query(default="", description="カテゴリー（空ならすべて）"),
+    # 【PR-16・追加】新画面はIDを送る。旧category（名称）も引き続き受け付ける。
+    category_id: int | None = Query(default=None, ge=1),
     indiv_wrap: bool = Query(default=False, description="true なら、説明文に「個包装」とある商品だけ"),
     price_min: int | None = Query(default=None, ge=0, description="価格の下限（以上）"),
     price_max: int | None = Query(default=None, ge=0, description="価格の上限（以下）"),
@@ -145,6 +159,23 @@ def search(
     # 別のリクエストとは共有しない。
     conn = get_connection()
     try:
+        # 【PR-16・追加】ID指定と旧名称指定を同じID条件に正規化する。
+        # 存在しないIDは422。未選択のNoneとは区別する。
+        resolved_category_id = category_id
+        if category_id is not None:
+            found = fetch_all("SELECT category_id FROM product_category WHERE category_id=%s",
+                            (category_id,), conn=conn)
+            if not found:
+                raise HTTPException(status_code=422, detail="利用できないカテゴリーです")
+        if category:
+            found = fetch_all("SELECT category_id FROM product_category WHERE category_name=%s",
+                            (category,), conn=conn)
+            # 旧APIの未知の名称は、従来と同じ0件になる内部値にする。
+            legacy_id = int(found[0]["category_id"]) if found else -1
+            # IDと名称が両方届いた場合、異なる分類を指していれば入力エラー。
+            if category_id is not None and category_id != legacy_id:
+                raise HTTPException(status_code=422, detail="カテゴリーIDと名称が一致しません")
+            resolved_category_id = legacy_id
         scene_ids = list(dict.fromkeys(life_scene_ids))
         if scene_ids:
             active = {r["id"] for r in fetch_life_scenes(conn)}
@@ -160,6 +191,7 @@ def search(
         condition = dict(
             q=q,
             category=category,
+            category_id=resolved_category_id,
             indiv_wrap=indiv_wrap,
             price_min=price_min,
             price_max=price_max,
@@ -176,7 +208,10 @@ def search(
         rows = fetch_all(
             # 追加：サイズ選び不要
             # todo: 候補の並び順を変えなくても良いか要検討
-            f"""SELECT product_id, category, brand, product_name, price, rating, review_count, description, is_size_free,
+            f"""SELECT product_id,
+                -- 【PR-16・変更】カードには従来と同じ名称文字列を返す。
+                (SELECT pc.category_name FROM product_category pc
+                WHERE pc.category_id=products.category_id) AS category, brand, product_name, price, rating, review_count, description, is_size_free,
                 COUNT(*) OVER() AS total_count
                 FROM products WHERE {where}
                 ORDER BY sales_count DESC, product_id
@@ -232,8 +267,10 @@ def search(
                 candidates.append(("lifeScenes", "生活シーン", dict(scene_ids=[])))
             if size_free:
                 candidates.append(("sizeFree", "サイズ選び不要", dict(size_free=False)))
-            if category:
-                candidates.append(("category", "カテゴリー", dict(category="")))
+            # 【PR-16・変更】カテゴリ緩和では旧名称とIDの両方を外す。
+            # IDだけが残ると、条件を外したことにならない。
+            if category or category_id is not None:
+                candidates.append(("category", "カテゴリー", dict(category="", category_id=None)))
             if q.strip():
                 candidates.append(("keyword", "キーワード", dict(q="")))
             if indiv_wrap:
