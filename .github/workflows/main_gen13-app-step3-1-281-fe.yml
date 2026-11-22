@@ -69,4 +69,5 @@ jobs:
           slot-name: 'Production'
           # 【手順書3.4】#5: release.zipに変更
           package: release.zip
+          clean: true  # 【追加】新しいZIPを展開する前にデプロイ先フォルダーの既存ファイルを削除する
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_39C649329FDF475593E3E042654B6C0D }}
