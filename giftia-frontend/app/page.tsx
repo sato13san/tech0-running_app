@@ -6,13 +6,24 @@
 
 import { useState, useEffect, useRef } from "react";
 import ResultCard from "./ResultCard";
-import { searchGifts, getLifeScenes, type Gift, type LifeScene, type SearchCondition, type Relaxation } from "@/lib/api";
+import { searchGifts, getLifeScenes, getCategories, type Category, type Gift, type LifeScene, type SearchCondition, type Relaxation } from "@/lib/api";
 
 export default function Home() {
   // ① 状態（変化するデータ）を覚える箱
   const [mode, setMode] = useState<"standard" | "business">("standard"); // どのタブか
   const [keyword, setKeyword] = useState("");                             // 入力した言葉
-  const [category, setCategory] = useState("");                           // 選んだカテゴリー
+  const [categoryId, setCategoryId] = useState("");                           // 選んだカテゴリー
+  const [categories, setCategories] = useState<Category[]>([]);
+  const [categoryLoading, setCategoryLoading] = useState(true);
+  const [categoryError, setCategoryError] = useState("");
+  async function loadCategories() {
+    setCategoryLoading(true); setCategoryError("");
+    try { setCategories(await getCategories()); }
+    catch { setCategoryError("カテゴリーを取得できません。再取得してください。"); }
+    finally { setCategoryLoading(false); }
+  }
+  // 初期表示時に取得。開発時のStrict ModeではEffectが再実行される場合がある。
+  useEffect(() => { void loadCategories(); }, []);
   const [indivWrap, setIndivWrap] = useState(false); // 個包装だけ（取引先へのお礼）
   const [priceBand, setPriceBand] = useState("");                         // 価格帯（取引先へのお礼）
   const [results, setResults] = useState<Gift[] | null>(null);            // 検索結果
@@ -49,7 +60,10 @@ export default function Home() {
     const id = ++requestId.current;
     setError(""); setBusy(true); setResults(null);
     // Build labels NOW so editing inputs while awaiting cannot relabel old results.
-    const labels = [condition.keyword, condition.category,
+
+    const labels = [condition.keyword, condition.categoryId !== undefined
+      ? categories.find(c => c.id === condition.categoryId)?.name ?? "カテゴリー"
+      : condition.category,
       condition.indivWrap ? "個包装" : "",
       condition.priceBand === "3000" ? "3,000円以上5,000円未満" : "",
       condition.priceBand === "5000" ? "5,000円以上10,000円未満" : "",
@@ -75,7 +89,7 @@ export default function Home() {
       setError("価格の下限は上限以下にしてください"); return;
     }
     const condition: SearchCondition = mode === "standard"
-      ? { keyword, category, indivWrap: false, priceBand: "", lifeSceneIds }
+      ? { keyword, category: "", categoryId: categoryId === "" ? undefined : Number(categoryId), indivWrap: false, priceBand: "", lifeSceneIds }
       : { keyword: "", category: "", indivWrap, priceBand, lifeSceneIds: [] };
     if (mode === "standard") {
       condition.sizeFree = sizeFree;
@@ -123,12 +137,18 @@ export default function Home() {
             <label>価格下限（円）<input type="number" min="0" step="1" value={priceMin} onChange={e => setPriceMin(e.target.value)} /></label>
             <label>価格上限（円）<input type="number" min="0" step="1" value={priceMax} onChange={e => setPriceMax(e.target.value)} /></label>
             <input className="q" value={keyword} onChange={(e) => setKeyword(e.target.value)} placeholder="キーワード（例：送別 お菓子）" />
-            <select value={category} onChange={(e) => setCategory(e.target.value)}>
-              <option value="">すべてのカテゴリー</option>
-              <option value="コスメ">コスメ</option>
-              <option value="食品">食品</option>
-              <option value="生活雑貨">生活雑貨</option>
-            </select>
+            <label>カテゴリー
+              <select value={categoryId} disabled={categoryLoading || !!categoryError}
+                onChange={e => setCategoryId(e.target.value)}>
+                {/* 未選択は空文字。valueはID、利用者に見せる文字はname。 */}
+                <option value="">すべてのカテゴリー</option>
+                {categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+            </label>
+            {categoryLoading && <span>カテゴリーを取得中…</span>}
+            {categoryError && <p role="alert">{categoryError}
+              <button type="button" onClick={() => void loadCategories()}>再取得</button>
+            </p>}
           </>
         ) : (
           <>
@@ -140,7 +160,7 @@ export default function Home() {
             </select>
           </>
         )}
-        <button type="submit" disabled={busy}>{busy ? "検索中…" : "検索"}</button>
+        <button type="submit" disabled={busy || (mode === "standard" && (categoryLoading || !!categoryError))}>{busy ? "検索中…" : "検索"}</button>
       </form>
 
       {error && <p className="summary" role="alert">{error}</p>}
