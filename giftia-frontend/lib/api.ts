@@ -7,6 +7,7 @@
 export type LifeScene = { id: string; name: string; cardLabel: string; sortOrder: number };
 export type Relaxation = { key: string; label: string; total: number };
 export type SearchResponse = { total: number; results: Gift[]; relaxations: Relaxation[]; logSaved?: boolean };
+export type Category = { id: number; name: string; sortOrder: number };
 
 export type Gift = {
   description: string;
@@ -23,6 +24,7 @@ export type Gift = {
 
 // 画面から渡す検索条件（2つのタブの分をまとめて持つ）
 export type SearchCondition = {
+  categoryId?: number;
   lifeSceneIds?: string[];
   sizeFree?: boolean;
   priceMin?: number;
@@ -42,7 +44,8 @@ export async function searchGifts(c: SearchCondition): Promise<SearchResponse> {
   // ① 条件を URL のクエリ（?q=...&category=...）に組み立てる。空の条件は送らない
   const params = new URLSearchParams();
   if (c.keyword) params.set("q", c.keyword);
-  if (c.category) params.set("category", c.category);
+  if (c.categoryId !== undefined) params.set("category_id", String(c.categoryId));
+  else if (c.category) params.set("category", c.category);
   if (c.indivWrap) params.set("indiv_wrap", "true");
   if (c.priceBand === "3000") { params.set("price_min", "3000"); params.set("price_max", "4999"); } // 3,000以上 5,000未満
   if (c.priceBand === "5000") { params.set("price_min", "5000"); params.set("price_max", "9999"); } // 5,000以上 10,000未満
@@ -69,4 +72,13 @@ export async function getLifeScenes(): Promise<LifeScene[]> {
   }
   const data = await res.json();
   return data.lifeScenes;
+}
+
+// ▼ [追加] PR-17：初期表示・再取得から呼ぶカテゴリー一覧取得関数を追加
+// HTTPエラーは例外にし、画面側で再取得を案内する。
+export async function getCategories(): Promise<Category[]> {
+  const res = await fetch(`${API}/api/categories`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`HTTP ${res.status}: Failed to fetch categories`);
+  const data = await res.json();
+  return data.categories;
 }
